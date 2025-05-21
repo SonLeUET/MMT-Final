@@ -3,9 +3,48 @@
 # Name:
 # HUID:
 #####################################################
+import base64
+import math
+import pickle
+from typing import Any, Optional # kiểu dữ liệu
+from packet import Packet
 
 from router import Router
 
+_Addr = Any
+_Port = Any
+_Cost = int
+ 
+# Constants
+_INFINITY = math.inf
+
+class _ForwardingTableEntry:
+    def __init__(self, cost: _Cost, next_hop: Optional[_Addr] = None, port: Optional[_Port] = None):
+        self.cost = cost
+        self.maybe_next_hop = next_hop
+        self.maybe_port = port
+ 
+class _NeighborEntry:
+    def __init__(self, cost: _Cost, port: _Port):
+        self.cost = cost
+        self.port = port
+ 
+class _DistanceVectorEntry:
+    def __init__(self, cost: _Cost, next_hop: _Addr):
+        self.cost = cost
+        self.next_hop = next_hop
+ 
+ 
+def _serialize(obj: Any) -> str:
+    bytes_ = pickle.dumps(obj) # tạo bytes tuần tự hóa cho obj
+    str_ = base64.b64encode(bytes_).decode() # chuyển bytes thành ASCII-safe string
+    return str_
+ 
+ 
+def _deserialize(str_: str) -> Any:
+    bytes_ = base64.b64decode(str_.encode()) # giải Base64 thành bytes
+    obj = pickle.loads(bytes_) # phục hồi object gốc, là dict của _DistanceVectorEntry
+    return obj
 
 class DVrouter(Router):
     """Distance vector routing protocol implementation.
@@ -40,32 +79,41 @@ class DVrouter(Router):
             #   broadcast the distance vector of this router to neighbors
             pass
 
-    def handle_new_link(self, port, endpoint, cost):
-        """Handle new link."""
-        # TODO
-        #   update the distance vector of this router
-        #   update the forwarding table
-        #   broadcast the distance vector of this router to neighbors
-        pass
-
-    def handle_remove_link(self, port):
-        """Handle removed link."""
-        # TODO
-        #   update the distance vector of this router
-        #   update the forwarding table
-        #   broadcast the distance vector of this router to neighbors
-        pass
+    def handle_new_link(self, port: _Port, endpoint: _Addr, cost: _Cost):
+        # Add neighbor
+        self.__neighbor_addrs_by_ports[port] = endpoint
+        self.__neighbors_by_addrs[endpoint] = _NeighborEntry(cost=cost, port=port)
+        # Initialize forwarding entry to neighbor
+        entry = self.__forwarding_table.get(endpoint)
+        if not entry or entry.cost != cost:
+            self.__forwarding_table[endpoint] = _ForwardingTableEntry(cost=cost, next_hop=endpoint, port=port)
+            self.__broadcast_to_neighbors()
+ 
+    def handle_remove_link(self, port: _Port):
+        neighbor = self.__neighbor_addrs_by_ports.pop(port)
+        self.__neighbors_by_addrs.pop(neighbor, None)
+        # Invalidate routes via this port
+        for addr, entry in list(self.__forwarding_table.items()):
+            if entry.maybe_port == port:
+                self.__forwarding_table[addr] = _ForwardingTableEntry(cost=_INFINITY, next_hop=None, port=None)
+        self.__broadcast_to_neighbors()
 
     def handle_time(self, time_ms):
-        """Handle current time."""
         if time_ms - self.last_time >= self.heartbeat_time:
             self.last_time = time_ms
-            # TODO
-            #   broadcast the distance vector of this router to neighbors
-            pass
-
+            self.__broadcast_to_neighbors()
+ 
     def __repr__(self):
-        """Representation for debugging in the network visualizer."""
-        # TODO
-        #   NOTE This method is for your own convenience and will not be graded
-        return f"DVrouter(addr={self.addr})"
+        return f"DVrouter(addr={self.addr}, table={{" + \
+               ", ".join(f"{addr}:{entry.cost}" for addr, entry in self.__forwarding_table.items()) + "}})"
+ 
+    def __broadcast_to_neighbors(self):
+        for neighbor_addr, neighbor in self.__neighbors_by_addrs.items():
+            # Poison reverse: if our next_hop for addr is this neighbor, advertise INFINITY
+            dv: dict[_Addr, _DistanceVectorEntry] = {}
+            for addr, entry in self.__forwarding_table.items():
+                advertised_cost = _INFINITY if (entry.maybe_next_hop == neighbor_addr and addr != neighbor_addr) else entry.cost
+                dv[addr] = _DistanceVectorEntry(cost=advertised_cost, next_hop=entry.maybe_next_hop)
+            content = _serialize(dv)
+            packet = Packet(Packet.ROUTING, self.addr, neighbor_addr, content)
+            self.send(neighbor.port, packet)
