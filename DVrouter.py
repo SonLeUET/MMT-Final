@@ -73,19 +73,22 @@ class DVrouter(Router):
             distance_vector: dict[_Addr, _DistanceVectorEntry] = _deserialize(packet.content)
             neighbor = packet.src_addr
  
+ 
             for addr, dv_entry in distance_vector.items():
                 # If poison reverse indicates unreachable
                 if dv_entry.cost == _INFINITY:
-                    pass
+                    entry = self.__forwarding_table.get(addr)
+                    if entry and entry.maybe_next_hop == neighbor:
+                        self.__forwarding_table[addr] = _ForwardingTableEntry(cost=_INFINITY, next_hop=None, port=None)
+
                 else:
-                    # bellman ford
                     neigh_cost = self.__neighbors_by_addrs[neighbor].cost
                     new_cost = min(dv_entry.cost + neigh_cost, _INFINITY)
                     entry = self.__forwarding_table.get(addr)
                     if not entry or new_cost < entry.cost:
                         port_to_neighbor = self.__neighbors_by_addrs[neighbor].port
                         self.__forwarding_table[addr] = _ForwardingTableEntry(cost=new_cost, next_hop=neighbor, port=port_to_neighbor)
-
+   
  
 
 
