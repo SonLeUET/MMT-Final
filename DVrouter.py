@@ -1,133 +1,268 @@
-####################################################
-# DVrouter.py
-# Name:
-# HUID:
-#####################################################
+# cung cấp hàm mã hóa/giải mã Base64. Dùng để biến mảng bytes của pickle thanh chuỗi để có thể gửi được cua Packet.content
 import base64
 import math
+ 
+# Cho phép tuần tự hóa (serialize) bất kỳ đối tượng Python nào thành mảng byte và phục hồi (deserialize) lại đối tượng đó.
 import pickle
 from typing import Any, Optional # kiểu dữ liệu
 from packet import Packet
-
 from router import Router
-
-_Addr = Any
-_Port = Any
-_Cost = int
  
-# Constants
-_INFINITY = math.inf
-
+ADDRESS_TYPE = Any
+PORT_TYPE = Any
+COST_TYPE = int
+ 
+INFINITY = math.inf
+ 
+ 
 class _ForwardingTableEntry:
-    def __init__(self, cost: _Cost, next_hop: Optional[_Addr] = None, port: Optional[_Port] = None):
+    """
+    Một dòng trong bảng forwarding table
+        - cost: Chi phí tổng từ router này đến đích
+        - next_router: router tiếp theo trong đường đi ngắn nhất.
+        - next_port: địa chỉ của router kế tiếp đó trong đường đi ngắn nhất.
+    """
+    def __init__(self, cost: COST_TYPE, next_router: Optional[ADDRESS_TYPE] = None, next_router_port: Optional[PORT_TYPE] = None):
         self.cost = cost
-        self.maybe_next_hop = next_hop
-        self.maybe_port = port
+        self.next_router = next_router
+        self.next_router_port = next_router_port
  
 class _NeighborEntry:
-    def __init__(self, cost: _Cost, port: _Port):
-        self.cost = cost
-        self.port = port
+    """
+    Lưu thông tin địa chỉ và cổng của router kế tiếp (hàng xóm).
+    """
+    def __init__(self, neighbor_cost: COST_TYPE, neighbor_port: PORT_TYPE):
+        self.neighbor_cost = neighbor_cost
+        self.neighbor_port = neighbor_port
  
 class _DistanceVectorEntry:
-    def __init__(self, cost: _Cost, next_hop: _Addr):
+    """
+    Một dòng trong distance vector khi chuẩn bị serialize để gửi cho neighbor
+        - cost: Chi phí từ router này tới đích.
+        - next_router: Địa chỉ của router kế tiếp.
+    """
+    def __init__(self, cost: COST_TYPE, next_router: ADDRESS_TYPE):
         self.cost = cost
-        self.next_hop = next_hop
+        self.next_router = next_router
  
  
 def _serialize(obj: Any) -> str:
+    """
+    Đóng gói khoảng khách vector thành string để nhét vào Packet.content
+ 
+    """
     bytes_ = pickle.dumps(obj) # tạo bytes tuần tự hóa cho obj
     str_ = base64.b64encode(bytes_).decode() # chuyển bytes thành ASCII-safe string
     return str_
  
  
 def _deserialize(str_: str) -> Any:
+    """
+    Khôi phục object
+    """
     bytes_ = base64.b64decode(str_.encode()) # giải Base64 thành bytes
     obj = pickle.loads(bytes_) # phục hồi object gốc, là dict của _DistanceVectorEntry
     return obj
-
+ 
 class DVrouter(Router):
     """Distance vector routing protocol implementation.
-
+ 
     Add your own class fields and initialization code (e.g. to create forwarding table
     data structures). See the `Router` base class for docstrings of the methods to
     override.
     """
-
+ 
     def __init__(self, addr, heartbeat_time):
+        """
+        - addr: Địa chỉ của router này
+        - heartbeat_time: khoảng thời gian giữa hai lần update định kỳ.
+        """
         Router.__init__(self, addr)  # Initialize base class - DO NOT REMOVE
         self.heartbeat_time = heartbeat_time
-        self.last_time = 0
+        self.last_time = 0 # thời điểm cuối router đã gửi update
+        # # TODO
+        # #   add your own class fields and initialization code here
+        # pass
+ 
+        # Forwarding table: dest -> entry(cost, next_hop, port)
+        self.__forwarding_table: dict[ADDRESS_TYPE, _ForwardingTableEntry] = {}
+        self.__forwarding_table[self.addr] = _ForwardingTableEntry(cost=0, next_router=self.addr, next_router_port=None)
+ 
+        # Neighbors by port and by address
+        self.__neighbor_address_by_port: dict[PORT_TYPE, ADDRESS_TYPE] = {}
+        self.__neighbor_by_address: dict[ADDRESS_TYPE, _NeighborEntry] = {} # danh sách cạnh kề
+ 
+    def handle_packet(self, port, packet):
+        """Process incoming packet."""
         # TODO
-        #   add your own class fields and initialization code here
-        pass
-
-    def handle_packet(self, port: _Port, packet: Packet):
+        """Nếu là gói tin, chuyển tiếp sang router tiếp theo"""
         if packet.is_traceroute:
-            dst = packet.dst_addr
-            entry = self.__forwarding_table.get(dst)
-            if entry and entry.cost < _INFINITY and entry.maybe_port is not None:
-                self.send(entry.maybe_port, packet)
+            # Hint: this is a normal data packet
+            # If the forwarding table contains packet.dst_addr
+            #   send packet based on forwarding table, e.g., self.send(port, packet)
+            # pass
+            final_address = packet.dst_addr
+            entry = self.__forwarding_table.get(final_address)
+            if entry and entry.cost < INFINITY and entry.next_router_port is not None:
+                self.send(entry.next_router_port, packet)
+ 
         else:
-            # Routing packet
-            distance_vector: dict[_Addr, _DistanceVectorEntry] = _deserialize(packet.content)
-            neighbor = packet.src_addr
+            """Gói routing update do một neighbor gửi, cập nhật distance vector"""
+            # Hint: this is a routing packet generated by your routing protocol
+            # If the received distance vector is different
+            #   update the local copy of the distance vector
+            #   update the distance vector of this router
+            #   update the forwarding table
+            #   broadcast the distance vector of this router to neighbors
+            distance_vector: dict[ADDRESS_TYPE, _DistanceVectorEntry] = _deserialize(packet.content)
+            neighbor = packet.src_addr # địa chỉ router gửi gói này
             updated = False
  
-            for addr, dv_entry in distance_vector.items():
-                # If poison reverse indicates unreachable
-                if dv_entry.cost == _INFINITY:
-                    entry = self.__forwarding_table.get(addr)
-                    if entry and entry.maybe_next_hop == neighbor:
-                        self.__forwarding_table[addr] = _ForwardingTableEntry(cost=_INFINITY, next_hop=None, port=None)
+ 
+            """Duyệt các dòng trong bảng distance vector của neighbor gửi"""
+            for address, dv_entry in distance_vector.items():
+                if dv_entry.cost == INFINITY:
+                    """Ví dụ router hiện tại là R, neighbor vừa gửi là A
+                        (address = B, neighbor = A)
+                        Nếu có router B mà khoảng cách từ A tới B là inf
+                            thì khoảng cách từ R tới B qua A cũng là inf
+                            nên nếu đi qua A thì sẽ không đi được tới B,
+                            vì vậy nếu lúc trước đánh dấu R đi qua A để đến B
+                            thì sẽ xóa entry này
+                    """
+                    entry = self.__forwarding_table.get(address)
+                    if entry and entry.next_router == neighbor: # nếu R đi qua A để đến B
+                        self.__forwarding_table[address] = _ForwardingTableEntry(
+                            cost = INFINITY,
+                            next_router = None, 
+                            next_router_port = None
+                        )
                         updated = True
+ 
                 else:
-                    neigh_cost = self.__neighbors_by_addrs[neighbor].cost
-                    new_cost = min(dv_entry.cost + neigh_cost, _INFINITY)
-                    entry = self.__forwarding_table.get(addr)
-                    if not entry or new_cost < entry.cost:
-                        port_to_neighbor = self.__neighbors_by_addrs[neighbor].port
-                        self.__forwarding_table[addr] = _ForwardingTableEntry(cost=new_cost, next_hop=neighbor, port=port_to_neighbor)
+                    """
+                    Nếu khoảng cách từ A tới B khác inf, dùng BellmanFord 
+                        để cập nhật khoảng cách từ R tới B
+                    """
+                    cost_to_neighbor = self.__neighbor_by_address[neighbor].neighbor_cost
+                    current_entry = self.__forwarding_table.get(address)
+                    if not current_entry or min(INFINITY, dv_entry.cost + cost_to_neighbor) < current_entry.cost:
+                        """
+                        dv_entry.cost = w_AB
+                        cost_to_neighbor = w_RA
+                        current_entry.cost = w_RB
+ 
+                        if w_RA + w_AB < w_RB => w_RB = w_RA + w_AB
+                        Đi qua neighbor A để đến B
+                        """
+                        neighbor_port = self.__neighbor_by_address[neighbor].neighbor_port
+                        self.__forwarding_table[address] = _ForwardingTableEntry(
+                            cost = min(INFINITY, dv_entry.cost + cost_to_neighbor),
+                            next_router = neighbor,
+                            next_router_port = neighbor_port
+                        )
                         updated = True
  
             if updated:
                 self.__broadcast_to_neighbors()
-
-    def handle_new_link(self, port: _Port, endpoint: _Addr, cost: _Cost):
-        # Add neighbor
-        self.__neighbor_addrs_by_ports[port] = endpoint
-        self.__neighbors_by_addrs[endpoint] = _NeighborEntry(cost=cost, port=port)
-        # Initialize forwarding entry to neighbor
+ 
+ 
+ 
+ 
+    def handle_new_link(self, port, endpoint, cost):
+        """Handle new link."""
+        # TODO
+        #   update the distance vector of this router
+        #   update the forwarding table
+        #   broadcast the distance vector of this router to neighbors
+ 
+        """Thêm cạnh, 2 chiều"""
+        self.__neighbor_address_by_port[port] = endpoint
+        self.__neighbor_by_address[endpoint] = _NeighborEntry(
+            neighbor_cost = cost,
+            neighbor_port = port
+        )
+ 
+ 
+        """
+        Kiểm tra xem trong forwarding_table đã có entry của endpoit chưa, 
+            hoặc nếu có nhưng cost khác cost mới
+        Nếu chưa có hoặc cost thay đổi thì tạo entry mới
+        """
         entry = self.__forwarding_table.get(endpoint)
         if not entry or entry.cost != cost:
-            self.__forwarding_table[endpoint] = _ForwardingTableEntry(cost=cost, next_hop=endpoint, port=port)
+            self.__forwarding_table[endpoint] = _ForwardingTableEntry(
+                cost = cost, 
+                next_router = endpoint,
+                next_router_port = port
+            )
             self.__broadcast_to_neighbors()
  
-    def handle_remove_link(self, port: _Port):
-        neighbor = self.__neighbor_addrs_by_ports.pop(port)
-        self.__neighbors_by_addrs.pop(neighbor, None)
-        # Invalidate routes via this port
+ 
+ 
+    def handle_remove_link(self, port):
+        """Handle removed link."""
+        # TODO
+        #   update the distance vector of this router
+        #   update the forwarding table
+        #   broadcast the distance vector of this router to neighbors
+ 
+        """Xóa mapping port → neighbor address, rồi neighbor → entry"""
+        neighbor = self.__neighbor_address_by_port.pop(port)
+        self.__neighbor_by_address.pop(neighbor, None)
+ 
+        """Hủy mọi tuyến đi qua port này"""
         for addr, entry in list(self.__forwarding_table.items()):
-            if entry.maybe_port == port:
-                self.__forwarding_table[addr] = _ForwardingTableEntry(cost=_INFINITY, next_hop=None, port=None)
+            if entry.next_router_port == port:
+                # Đánh dấu đích 'addr' không còn tới được
+                self.__forwarding_table[addr] = _ForwardingTableEntry(
+                    cost = INFINITY,
+                    next_router = None,
+                    next_router_port = None
+                )
+ 
+        """Thông báo ngay cho các neighbor còn lại"""
         self.__broadcast_to_neighbors()
-
+ 
+ 
+ 
+    """Sau mỗi khoảng thời gian là time_ms, gửi một bản cập nhật 
+        distance vector mới, ngay cả khi không có thay đổi, 
+        để bảo đảm thông tin về topology vẫn lan truyền đều khắp mạng.
+    """
     def handle_time(self, time_ms):
+        """Handle current time."""
         if time_ms - self.last_time >= self.heartbeat_time:
             self.last_time = time_ms
+            # TODO
+            #   broadcast the distance vector of this router to neighbors
             self.__broadcast_to_neighbors()
  
     def __repr__(self):
-        return f"DVrouter(addr={self.addr}, table={{" + \
-               ", ".join(f"{addr}:{entry.cost}" for addr, entry in self.__forwarding_table.items()) + "}})"
+        """Representation for debugging in the network visualizer."""
+        # TODO
+        #   NOTE This method is for your own convenience and will not be graded
+        return f"DVrouter(addr={self.addr})"
+ 
  
     def __broadcast_to_neighbors(self):
-        for neighbor_addr, neighbor in self.__neighbors_by_addrs.items():
-            # Poison reverse: if our next_hop for addr is this neighbor, advertise INFINITY
-            dv: dict[_Addr, _DistanceVectorEntry] = {}
-            for addr, entry in self.__forwarding_table.items():
-                advertised_cost = _INFINITY if (entry.maybe_next_hop == neighbor_addr and addr != neighbor_addr) else entry.cost
-                dv[addr] = _DistanceVectorEntry(cost=advertised_cost, next_hop=entry.maybe_next_hop)
-            content = _serialize(dv)
-            packet = Packet(Packet.ROUTING, self.addr, neighbor_addr, content)
-            self.send(neighbor.port, packet)
+        for neighbor_address, neighbor_entry in self.__neighbor_by_address.items():
+            distance_vector: dict[ADDRESS_TYPE, _DistanceVectorEntry] = {}
+            for address, current_entry in self.__forwarding_table.items():
+                """
+                Ví dụ 1 -- 2 -- 3 -- 4 ... -- n
+                Thì 1 sẽ báo cho 2 biết là từ 1 tới 3, 4, .., n bằng inf
+                Tương tự thì 2 báo cho 3 biết là từ 2 tới 4, 5, ..., n bằng inf
+                    còn vẫn báo từ 2 tới 1 bằng 1, từ 2 tới 2 bằng 0, từ 2 tới 3 bằng 1
+                """
+                advertised_cost = (
+                    INFINITY if (current_entry.next_router == neighbor_address and address != neighbor_address)
+                    else current_entry.cost
+                )
+                distance_vector[address] = _DistanceVectorEntry(
+                    cost = advertised_cost,
+                    next_router = current_entry.next_router
+                )
+            content = _serialize(distance_vector)
+            packet = Packet(Packet.ROUTING, self.addr, neighbor_address, content)
+            self.send(neighbor_entry.neighbor_port, packet)
